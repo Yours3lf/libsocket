@@ -25,13 +25,15 @@ private:
 #ifdef _WIN32
 	typedef uint64_t socketType;
 #define SOCKET_VALID(x) (x != INVALID_SOCKET)
-	const static socketType is = INVALID_SOCKET;
+	const static socketType invalidSocket = INVALID_SOCKET;
+	const int socketError = SOCKET_ERROR;
 #else
 	typedef int32_t socketType;
 #define SOCKET_VALID(x) (x >= 0)
-	const static socketType is = -1;
+	const static socketType invalidSocket = -1;
+	const int socketError = SO_ERROR;
 #endif
-	socketType s = is;
+	socketType s = invalidSocket;
 
 	void convertAddress(const std::string& address, uint16_t port, int family, struct sockaddr* outAddr)
 	{
@@ -152,15 +154,12 @@ private:
 		if (this->isValid())
 			return;
 
-#ifdef _WIN32
 		s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-		if (s == INVALID_SOCKET)
+		if (s == invalidSocket)
 		{
 			checkErrorMessage(1);
 		}
-#else
-#endif
 	}
 
 public:
@@ -221,7 +220,7 @@ public:
 		status = ::shutdown(s, SHUT_RDWR);
 
 		checkErrorMessage(status);
-		
+
 		//if (status == 0)
 		{
 			status = ::close(s);
@@ -230,13 +229,13 @@ public:
 		}
 #endif
 
-		s = is;
+		s = invalidSocket;
 	}
 
 	socket(socket&& ss)
 	{
 		s = ss.s;
-		ss.s = is;
+		ss.s = invalidSocket;
 	}
 
 	socket& operator=(socket&& ss)
@@ -244,12 +243,12 @@ public:
 		if (this != &ss)
 		{
 			s = ss.s;
-			ss.s = is;
+			ss.s = invalidSocket;
 		}
 
 		return *this;
 	}
-	
+
 	socket& operator=(const socket&) = delete;
 	socket(const socket&) = delete;
 
@@ -258,7 +257,7 @@ public:
 		close();
 	}
 
-	socket() : s(is)
+	socket() : s(invalidSocket)
 	{
 		assert(isInited);
 	}
@@ -280,7 +279,6 @@ public:
 		create();
 		assert(this->isValid());
 
-#ifdef _WIN32
 		struct sockaddr sockaddr;
 		convertAddress(address, port, AF_INET, &sockaddr);
 
@@ -289,8 +287,6 @@ public:
 		checkErrorMessage(res);
 
 		return res;
-#else
-#endif
 	}
 
 	//The bind function associates a local address with a socket.
@@ -299,7 +295,6 @@ public:
 		create();
 		assert(this->isValid());
 
-#ifdef _WIN32
 		struct sockaddr sockaddr;
 		convertAddress(address, port, AF_INET, &sockaddr);
 
@@ -308,8 +303,6 @@ public:
 		checkErrorMessage(res);
 
 		return res;
-#else
-#endif
 	}
 
 	//The listen function places a socket in a state 
@@ -318,21 +311,17 @@ public:
 	{
 		assert(this->isValid());
 
-#ifdef _WIN32
 		int res = ::listen(s, SOMAXCONN);
 
 		checkErrorMessage(res);
 
 		return res;
-#else
-#endif
 	}
 
 	socket accept()
 	{
 		assert(this->isValid());
 
-#ifdef _WIN32
 		socketType ss = ::accept(s, 0, 0);
 
 		if (!SOCKET_VALID(ss))
@@ -341,8 +330,6 @@ public:
 		}
 
 		return socket(ss);
-#else
-#endif
 	}
 
 	//The send function sends data on a connected socket.
@@ -351,17 +338,14 @@ public:
 		assert(this->isValid());
 		assert(buf);
 
-#ifdef _WIN32
 		int res = ::send(s, buf, len, 0);
 
-		if (res == SOCKET_ERROR)
+		if (res == socketError)
 		{
 			checkErrorMessage(res);
 		}
 
 		return res;
-#else
-#endif
 	}
 
 	//The recv function receives data from a connected socket 
@@ -371,33 +355,31 @@ public:
 		assert(this->isValid());
 		assert(buf);
 
-#ifdef _WIN32
 		int res = ::recv(s, buf, len, 0);
 
-		if (res == SOCKET_ERROR)
+		if (res == socketError)
 		{
 			checkErrorMessage(res);
 		}
 
 		return res;
-#else
-#endif
 	}
 
 	int getMaxMessageSize()
 	{
 		assert(this->isValid());
 
-#ifdef _WIN32
 		int val = 0;
 		int valSize = sizeof(val);
+#ifdef _WIN32
 		int res = ::getsockopt(s, SOL_SOCKET, SO_MAX_MSG_SIZE, (char*)&val, &valSize);
 
 		checkErrorMessage(res);
+#else
+		val = 65535;
+#endif
 
 		return val;
-#else
-#endif
 	}
 };
 
