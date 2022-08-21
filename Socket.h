@@ -10,10 +10,11 @@
 
 #pragma comment(lib, "ws2_32")
 #else
-#incude <sys / socket.h>
+#include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <string.h>
 #endif
 
 class socket
@@ -194,7 +195,6 @@ public:
 		}
 #else
 		isInited = false;
-		return 0;
 #endif
 	}
 
@@ -219,9 +219,14 @@ public:
 		}
 #else
 		status = ::shutdown(s, SHUT_RDWR);
-		if (status == 0)
+
+		checkErrorMessage(status);
+		
+		//if (status == 0)
 		{
-			status = close(s);
+			status = ::close(s);
+
+			checkErrorMessage(status);
 		}
 #endif
 
