@@ -11,11 +11,14 @@
 #pragma comment(lib, "ws2_32")
 #else
 #include <sys/socket.h>
+#include <sys/poll.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <string.h>
 #endif
+
+//https://beej.us/guide/bgnet/html/split/
 
 class socket
 {
@@ -26,29 +29,72 @@ private:
 	typedef uint64_t socketType;
 #define SOCKET_VALID(x) (x != INVALID_SOCKET)
 	const static socketType invalidSocket = INVALID_SOCKET;
-	const int socketError = SOCKET_ERROR;
 #else
 	typedef int32_t socketType;
 #define SOCKET_VALID(x) (x >= 0)
 	const static socketType invalidSocket = -1;
-	const int socketError = SO_ERROR;
 #endif
-	socketType s = invalidSocket;
 
-	void convertAddress(const std::string& address, uint16_t port, int family, struct sockaddr* outAddr)
+    socketType s = invalidSocket;
+
+#ifndef _WIN32
+#define SOCKET_ERROR SO_ERROR
+#endif
+
+    const int socketError = SOCKET_ERROR;
+
+#define checkErrorMessage(c) _checkErrorMessage(c, __FILE__, __LINE__)
+    static void _checkErrorMessage(int code, const char* file, int line)
+    {
+        if (!code)
+            return;
+
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        char* message = 0;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)&message, 0, NULL);
+        std::cerr << std::string(message) << "@" << file << ":" << line << std::endl;
+        LocalFree(message);
+#else
+        std::cerr << std::string(strerror(errno)) << "@" << file << ":" << line << std::endl;
+#endif
+    }
+
+	void convertAddress(const std::string& address, uint16_t port, int type, int family, struct sockaddr* outAddr, int* proto)
 	{
 		assert(outAddr);
+        assert(type);
+        assert(proto);
 
 		addrinfo* addressInfo = 0;
-		std::string portStr = std::to_string(port);
-		getaddrinfo(address.c_str(), portStr.c_str(), 0, &addressInfo);
+        addrinfo hints = {};
+        hints.ai_family = family;
+        hints.ai_socktype = type;
+        std::string portStr = std::to_string(port);
 
+        if (address.empty())
+        {    
+            hints.ai_flags = AI_PASSIVE;    
+        }
+
+        int res = getaddrinfo(address.empty() ? 0 : address.data(), portStr.c_str(), &hints, &addressInfo);
+
+        if (res)
+        {
+            std::cerr << gai_strerror(res) << std::endl;
+        }
+
+        bool found = false;
 		int i = 0;
 		for (addrinfo* ptr = addressInfo; ptr != 0; ptr = ptr->ai_next)
 		{
 			/**
 			std::cout << "Getaddrinfo response " << i++ << std::endl;
 			std::cout << "Flags " << ptr->ai_flags << std::endl;
+            std::cout << "Requested Family: " << family << std::endl;
 			std::cout << "Family ";
 			switch (ptr->ai_family)
 			{
@@ -115,46 +161,33 @@ private:
 			{
 				std::cout << "Canon name " << ptr->ai_canonname << std::endl;
 			}
-			std::cout << std::endl;
 			/**/
 
-			if (family == ptr->ai_family)
+			if (family == ptr->ai_family && type == ptr->ai_socktype)
 			{
+                found = true;
 				memcpy(outAddr, ptr->ai_addr, ptr->ai_addrlen);
+                *proto = ptr->ai_protocol;
 				break;
 			}
 		}
 
+        if (!found)
+        {
+            std::cerr << "Convert address couldn't find address matching family" << std::endl;
+        }
+
 		freeaddrinfo(addressInfo);
-	}
-
-	static void checkErrorMessage(int code)
-	{
-		if (!code)
-			return;
-
-#ifdef _WIN32
-		int error = WSAGetLastError();
-		char* message = 0;
-		FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-			NULL, error,
-			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			(LPSTR)&message, 0, NULL);
-		std::cerr << std::string(message) << std::endl;
-		LocalFree(message);
-#else
-		std::cerr << std::string(strerror(errno)) << std::endl;
-#endif
 	}
 
 	//The socket function creates a socket that is bound 
 	//to a specific transport service provider.
-	void create()
+    void create(int af, int type, int proto)
 	{
 		if (this->isValid())
 			return;
 
-		s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		s = ::socket(af, type, proto);
 
 		if (s == invalidSocket)
 		{
@@ -273,14 +306,22 @@ public:
 		return SOCKET_VALID(s);
 	}
 
-	//The connect function establishes a connection to a specified socket.
-	int connect(const std::string& address, uint16_t port)
-	{
-		create();
-		assert(this->isValid());
+    bool operator==(const class socket& ss) const
+    {
+        return s == ss.s;
+    }
 
+	//The connect function establishes a connection to a specified socket.
+	int connect(const std::string& address, uint16_t port, bool udp = false, bool ipv6 = false)
+	{
+        int family = ipv6 ? AF_INET6 : AF_INET, 
+            type = udp ? SOCK_DGRAM : SOCK_STREAM, 
+            proto;
 		struct sockaddr sockaddr;
-		convertAddress(address, port, AF_INET, &sockaddr);
+        convertAddress(address, port, type, family, &sockaddr, &proto);
+
+        create(family, type, proto);
+        assert(this->isValid());
 
 		int res = ::connect(s, &sockaddr, sizeof(sockaddr));
 
@@ -290,13 +331,19 @@ public:
 	}
 
 	//The bind function associates a local address with a socket.
-	int bind(const std::string& address, uint16_t port)
+	int bind(const std::string& address, uint16_t port, bool udp = false, bool ipv6 = false, bool reuseAddress = false, bool reusePort = false)
 	{
-		create();
-		assert(this->isValid());
-
+        int family = ipv6 ? AF_INET6 : AF_INET, 
+            type = udp ? SOCK_DGRAM : SOCK_STREAM, 
+            proto;
 		struct sockaddr sockaddr;
-		convertAddress(address, port, AF_INET, &sockaddr);
+		convertAddress(address, port, type, family, &sockaddr, &proto);
+
+        create(family, type, proto);
+        assert(this->isValid());
+
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*) & reuseAddress, sizeof(reuseAddress));
+        setsockopt(s, SOL_SOCKET, SO_REUSEPORT, (const char*) & reusePort, sizeof(reusePort));
 
 		int res = ::bind(s, &sockaddr, sizeof(sockaddr));
 
@@ -318,11 +365,51 @@ public:
 		return res;
 	}
 
-	socket accept()
+	socket accept(std::string* addrStr)
 	{
 		assert(this->isValid());
 
-		socketType ss = ::accept(s, 0, 0);
+        struct sockaddr_in addr;
+        int len = sizeof(addr);
+		socketType ss = ::accept(s, (struct sockaddr*) & addr, (socklen_t*) & len);
+
+        if (len == sizeof(addr) && addrStr && SOCKET_VALID(ss))
+        {
+            addrStr->reserve(3 + 6 + 16 + 6 + 1);
+            addrStr->append("AF ");
+            switch (addr.sin_family)
+            {
+            case AF_UNSPEC:
+            {
+                addrStr->append("unspec");
+                break;
+            }
+            case AF_INET:
+            {
+                addrStr->append("ipv4");
+                break;
+            }
+            case AF_INET6:
+            {
+                addrStr->append("ipv6");
+                break;
+            }
+            default:
+            {
+                addrStr->append(std::to_string(addr.sin_family));
+                break;
+            }
+            }
+
+            if (char* s = inet_ntoa(addr.sin_addr))
+            {
+                addrStr->append(" ");
+                addrStr->append(s);
+            }
+
+            addrStr->append(":");
+            addrStr->append(std::to_string(addr.sin_port));
+        }
 
 		if (!SOCKET_VALID(ss))
 		{
@@ -338,31 +425,80 @@ public:
 		assert(this->isValid());
 		assert(buf);
 
-		int res = ::send(s, buf, len, 0);
+        //send would raise SIGPIPE if the other side disconnected
+        //that would terminate our program
+        int flags = MSG_NOSIGNAL;
 
-		if (res == socketError)
-		{
-			checkErrorMessage(res);
-		}
+        int bytesSent = 0;
+        while (bytesSent < len)
+        {
+            int res = ::send(s, buf + bytesSent, len - bytesSent, flags);
 
-		return res;
+            if (res == socketError)
+            {
+                //check if the other side closed the connection
+                if (errno == EPIPE)
+                {
+                    return -2;
+                }
+
+                checkErrorMessage(res);
+                return res;
+            }
+
+            bytesSent += res;
+        }
+
+        assert(bytesSent == len);
+
+		return bytesSent;
 	}
+
+    bool receivedAnyBytes()
+    {
+        assert(this->isValid());
+
+        struct pollfd fds;
+        fds.fd = s;
+        fds.events = POLLIN;
+
+        ::poll(&fds, 1, 0);
+
+        return fds.revents & fds.events;
+    }
 
 	//The recv function receives data from a connected socket 
 	//or a bound connectionless socket.
-	int receive(char* buf, int len)
+	int receive(char* buf, int len, bool singleRecv = false)
 	{
 		assert(this->isValid());
 		assert(buf);
 
-		int res = ::recv(s, buf, len, 0);
+        int bytesReceived = 0;
+        while (bytesReceived < len)
+        {
+            int res = ::recv(s, buf + bytesReceived, len - bytesReceived, 0);
 
-		if (res == socketError)
-		{
-			checkErrorMessage(res);
-		}
+            //check if the other side closed the connection
+            if (res == 0)
+            {
+                return -2;
+            }
+            else if (res == socketError)
+            {
+                checkErrorMessage(res);
+                return res;
+            }
 
-		return res;
+            bytesReceived += res;
+
+            if (singleRecv)
+            {
+                break;
+            }
+        }
+
+        return bytesReceived;
 	}
 
 	int getMaxMessageSize()
