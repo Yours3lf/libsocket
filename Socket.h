@@ -401,10 +401,10 @@ public:
             }
             }
 
-            if (char* s = inet_ntoa(addr.sin_addr))
+            if (char* sa = inet_ntoa(addr.sin_addr))
             {
                 addrStr->append(" ");
-                addrStr->append(s);
+                addrStr->append(sa);
             }
 
             addrStr->append(":");
