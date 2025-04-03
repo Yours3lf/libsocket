@@ -22,6 +22,27 @@
 
 class socket
 {
+public:
+#define checkErrorMessage(c) socket::_checkErrorMessage(c, __FILE__, __LINE__)
+    static void _checkErrorMessage(int code, const char* file, int line)
+    {
+        if (!code)
+            return;
+
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        char* message = 0;
+        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)&message, 0, NULL);
+        std::cerr << std::string(message) << "@" << file << ":" << line << std::endl;
+        LocalFree(message);
+#else
+        std::cerr << std::string(strerror(errno)) << "@" << file << ":" << line << std::endl;
+#endif
+    }
+
 private:
 	static bool isInited;
 
@@ -42,26 +63,6 @@ private:
 #endif
 
     const int socketError = SOCKET_ERROR;
-
-#define checkErrorMessage(c) _checkErrorMessage(c, __FILE__, __LINE__)
-    static void _checkErrorMessage(int code, const char* file, int line)
-    {
-        if (!code)
-            return;
-
-#ifdef _WIN32
-        int error = WSAGetLastError();
-        char* message = 0;
-        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL, error,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPSTR)&message, 0, NULL);
-        std::cerr << std::string(message) << "@" << file << ":" << line << std::endl;
-        LocalFree(message);
-#else
-        std::cerr << std::string(strerror(errno)) << "@" << file << ":" << line << std::endl;
-#endif
-    }
 
 	void convertAddress(const std::string& address, uint16_t port, int type, int family, struct sockaddr* outAddr, int* proto)
 	{
@@ -231,36 +232,37 @@ public:
 	}
 
 	//The closesocket function closes an existing socket.
-	void close()
+	void close(bool clean = true)
 	{
 		if (!this->isValid())
 			return;
 
 		int status = 0;
-#ifdef _WIN32
-		status = ::shutdown(s, SD_BOTH);
+
+        if (clean)
+        {
+            status = ::shutdown(s, 
+#ifdef _WIN32                
+                SD_BOTH
+#else
+                SHUT_RDWR
+#endif
+            );
+        }
 
 		//could fail if socket is not connected
 		checkErrorMessage(status);
 
 		//if (status == 0)
 		{
+#ifdef _WIN32
 			status = closesocket(s);
-
-			checkErrorMessage(status);
-		}
 #else
-		status = ::shutdown(s, SHUT_RDWR);
-
-		checkErrorMessage(status);
-
-		//if (status == 0)
-		{
-			status = ::close(s);
+            status = ::close(s);
+#endif
 
 			checkErrorMessage(status);
 		}
-#endif
 
 		s = invalidSocket;
 	}
