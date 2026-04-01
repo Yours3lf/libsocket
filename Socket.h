@@ -70,7 +70,7 @@ private:
         assert(type);
         assert(proto);
 
-		addrinfo* addressInfo = 0;
+		addrinfo* addressInfo = nullptr;
         addrinfo hints = {};
         hints.ai_family = family;
         hints.ai_socktype = type;
@@ -81,7 +81,7 @@ private:
             hints.ai_flags = AI_PASSIVE;    
         }
 
-        int res = getaddrinfo(address.empty() ? 0 : address.data(), portStr.c_str(), &hints, &addressInfo);
+        int res = getaddrinfo(address.empty() ? nullptr : address.data(), portStr.c_str(), &hints, &addressInfo);
 
         if (res)
         {
@@ -89,8 +89,8 @@ private:
         }
 
         bool found = false;
-		int i = 0;
-		for (addrinfo* ptr = addressInfo; ptr != 0; ptr = ptr->ai_next)
+		//int i = 0;
+		for (addrinfo* ptr = addressInfo; ptr != nullptr; ptr = ptr->ai_next)
 		{
 			/**
 			std::cout << "Getaddrinfo response " << i++ << std::endl;
@@ -508,8 +508,8 @@ public:
 		assert(this->isValid());
 
 		int val = 0;
-		int valSize = sizeof(val);
 #ifdef _WIN32
+		int valSize = sizeof(val);		
 		int res = ::getsockopt(s, SOL_SOCKET, SO_MAX_MSG_SIZE, (char*)&val, &valSize);
 
 		checkErrorMessage(res);
