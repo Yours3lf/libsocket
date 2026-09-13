@@ -20,6 +20,8 @@
 
 //https://beej.us/guide/bgnet/html/split/
 
+struct EventWait;
+
 class socket
 {
 public:
@@ -57,6 +59,7 @@ private:
 #endif
 
     socketType s = invalidSocket;
+    friend struct EventWait;
 
 #ifndef _WIN32
 #define SOCKET_ERROR SO_ERROR
@@ -303,9 +306,27 @@ public:
 		s = ss;
 	}
 
-	bool isValid()
+	bool isValid() const
 	{
 		return SOCKET_VALID(s);
+	}
+
+	uint16_t localPort() const
+	{
+		assert(this->isValid());
+
+		struct sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+#ifdef _WIN32
+		int len = sizeof(addr);
+#else
+		socklen_t len = sizeof(addr);
+#endif
+		int res = ::getsockname(s, (struct sockaddr*)&addr, &len);
+		checkErrorMessage(res);
+		if (res != 0)
+			return 0;
+		return ntohs(addr.sin_port);
 	}
 
     bool operator==(const class socket& ss) const
