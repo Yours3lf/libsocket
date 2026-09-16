@@ -377,11 +377,13 @@ public:
 
 	//The listen function places a socket in a state 
 	//in which it is listening for an incoming connection.
-	int listen()
+	// Default 4096 rather than glibc's SOMAXCONN (128): the kernel still caps
+	// at net.core.somaxconn, so a raised sysctl is not silently truncated.
+	int listen(int backlog = 4096)
 	{
 		assert(this->isValid());
 
-		int res = ::listen(s, SOMAXCONN);
+		int res = ::listen(s, backlog);
 
 		checkErrorMessage(res);
 
