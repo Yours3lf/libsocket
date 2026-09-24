@@ -2,7 +2,10 @@
 
 #include <string>
 #include <iostream>
-#include <assert.h>
+#include <cstdint>
+#include <cstring>
+#include <utility>
+#include <cassert>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -15,203 +18,48 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
-#include <string.h>
+#include <fcntl.h>
+#include <errno.h>
 #endif
 
-//https://beej.us/guide/bgnet/html/split/
+// https://beej.us/guide/bgnet/html/split/
 
 struct EventWait;
 
+// Header-only TCP/UDP socket. Descriptors stay inside this type.
+// kPeerClosed: the peer shut the stream down (recv 0 or EPIPE).
+// kWouldBlock: non-blocking socket, no bytes moved.
+// A positive return is bytes moved. A short positive count is progress, not failure.
 class socket
 {
 public:
-#define checkErrorMessage(c) socket::_checkErrorMessage(c, __FILE__, __LINE__)
-    static void _checkErrorMessage(int code, const char* file, int line)
-    {
-        if (!code)
-            return;
+	static constexpr int kPeerClosed = -2;
+	static constexpr int kWouldBlock = -4;
+	// POSIX has no SO_MAX_MSG_SIZE. UDP datagrams larger than this are rejected
+	// by the kernel on a normal path MTU; callers can still getsockopt on Windows.
+	static constexpr int kUdpMaxMessageSize = 65535;
 
-#ifdef _WIN32
-        int error = WSAGetLastError();
-        char* message = 0;
-        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL, error,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPSTR)&message, 0, NULL);
-        std::cerr << std::string(message) << "@" << file << ":" << line << std::endl;
-        LocalFree(message);
-#else
-        std::cerr << std::string(strerror(errno)) << "@" << file << ":" << line << std::endl;
-#endif
-    }
-
-private:
-	static bool isInited;
-
+	// First member must stay the descriptor. TLSsession reads it with
+	// SSL_set_fd(ssl, *(int*)&socketObject).
 #ifdef _WIN32
 	typedef uint64_t socketType;
-#define SOCKET_VALID(x) (x != INVALID_SOCKET)
-	const static socketType invalidSocket = INVALID_SOCKET;
+	static constexpr socketType invalidSocket = static_cast<socketType>(INVALID_SOCKET);
 #else
 	typedef int32_t socketType;
-#define SOCKET_VALID(x) (x >= 0)
-	const static socketType invalidSocket = -1;
+	static constexpr socketType invalidSocket = -1;
 #endif
 
-    socketType s = invalidSocket;
-    friend struct EventWait;
+	inline static bool isInited = false;
 
-#ifndef _WIN32
-#define SOCKET_ERROR SO_ERROR
-#endif
-
-    const int socketError = SOCKET_ERROR;
-
-	void convertAddress(const std::string& address, uint16_t port, int type, int family, struct sockaddr* outAddr, int* proto)
-	{
-		assert(outAddr);
-        assert(type);
-        assert(proto);
-
-		addrinfo* addressInfo = nullptr;
-        addrinfo hints = {};
-        hints.ai_family = family;
-        hints.ai_socktype = type;
-        std::string portStr = std::to_string(port);
-
-        if (address.empty())
-        {    
-            hints.ai_flags = AI_PASSIVE;    
-        }
-
-        int res = getaddrinfo(address.empty() ? nullptr : address.data(), portStr.c_str(), &hints, &addressInfo);
-
-        if (res)
-        {
-            std::cerr << gai_strerror(res) << std::endl;
-        }
-
-        bool found = false;
-		//int i = 0;
-		for (addrinfo* ptr = addressInfo; ptr != nullptr; ptr = ptr->ai_next)
-		{
-			/**
-			std::cout << "Getaddrinfo response " << i++ << std::endl;
-			std::cout << "Flags " << ptr->ai_flags << std::endl;
-            std::cout << "Requested Family: " << family << std::endl;
-			std::cout << "Family ";
-			switch (ptr->ai_family)
-			{
-			case AF_UNSPEC:
-				std::cout << "unspec";
-				break;
-			case AF_INET:
-				std::cout << "ipv4";
-				break;
-			case AF_INET6:
-				std::cout << "ipv6";
-				break;
-			default:
-				std::cout << ptr->ai_family;
-				break;
-			}
-
-			std::cout << std::endl << "Socket type ";
-			switch (ptr->ai_socktype)
-			{
-			case 0:
-				std::cout << "unspecified";
-				break;
-			case SOCK_STREAM:
-				std::cout << "stream";
-				break;
-			case SOCK_DGRAM:
-				std::cout << "dgram";
-				break;
-			case SOCK_RAW:
-				std::cout << "raw";
-				break;
-			case SOCK_RDM:
-				std::cout << "rdm";
-				break;
-			case SOCK_SEQPACKET:
-				std::cout << "seqpacket";
-				break;
-			default:
-				std::cout << ptr->ai_socktype;
-				break;
-			}
-
-			std::cout << std::endl << "Protocol ";
-			switch (ptr->ai_protocol)
-			{
-			case 0:
-				std::cout << "unspecified";
-				break;
-			case IPPROTO_TCP:
-				std::cout << "tcp";
-				break;
-			case IPPROTO_UDP:
-				std::cout << "udp";
-				break;
-			default:
-				std::cout << ptr->ai_protocol;
-				break;
-			}
-
-			std::cout << std::endl;
-			std::cout << "Length " << ptr->ai_addrlen << std::endl;
-			if (ptr->ai_canonname)
-			{
-				std::cout << "Canon name " << ptr->ai_canonname << std::endl;
-			}
-			/**/
-
-			if (family == ptr->ai_family && type == ptr->ai_socktype)
-			{
-                found = true;
-				memcpy(outAddr, ptr->ai_addr, ptr->ai_addrlen);
-                *proto = ptr->ai_protocol;
-				break;
-			}
-		}
-
-        if (!found)
-        {
-            std::cerr << "Convert address couldn't find address matching family" << std::endl;
-        }
-
-		freeaddrinfo(addressInfo);
-	}
-
-	//The socket function creates a socket that is bound 
-	//to a specific transport service provider.
-    void create(int af, int type, int proto)
-	{
-		if (this->isValid())
-			return;
-
-		s = ::socket(af, type, proto);
-
-		if (s == invalidSocket)
-		{
-			checkErrorMessage(1);
-		}
-	}
-
-public:
 	static int init()
 	{
 #ifdef _WIN32
 		WSADATA wsaData;
-		int res = WSAStartup(MAKEWORD(1, 1), &wsaData);;
-		if (!res)
-		{
+		int res = WSAStartup(MAKEWORD(2, 2), &wsaData);
+		if (res == 0)
 			isInited = true;
-		}
-
-		checkErrorMessage(res);
-
+		else
+			reportLastError(__FILE__, __LINE__);
 		return res;
 #else
 		isInited = true;
@@ -225,65 +73,48 @@ public:
 		if (isInited)
 		{
 			isInited = false;
-			int res = WSACleanup();
-
-			checkErrorMessage(res);
+			if (WSACleanup() != 0)
+				reportLastError(__FILE__, __LINE__);
 		}
 #else
 		isInited = false;
 #endif
 	}
 
-	//The closesocket function closes an existing socket.
-	void close(bool clean = true)
+	socket()
+		: s(invalidSocket)
 	{
-		if (!this->isValid())
-			return;
-
-		int status = 0;
-
-        if (clean)
-        {
-            status = ::shutdown(s, 
-#ifdef _WIN32                
-                SD_BOTH
-#else
-                SHUT_RDWR
-#endif
-            );
-        }
-
-		//could fail if socket is not connected
-		checkErrorMessage(status);
-
-		//if (status == 0)
-		{
-#ifdef _WIN32
-			status = closesocket(s);
-#else
-            status = ::close(s);
-#endif
-
-			checkErrorMessage(status);
-		}
-
-		s = invalidSocket;
+		assert(isInited);
 	}
 
-	socket(socket&& ss)
+	explicit socket(socketType ss)
+		: s(ss)
 	{
-		s = ss.s;
-		ss.s = invalidSocket;
+		assert(isInited);
 	}
 
-	socket& operator=(socket&& ss)
+	socket(socket&& other) noexcept
+		: s(other.s)
+		, nonBlocking(other.nonBlocking)
+		, connected(other.connected)
 	{
-		if (this != &ss)
-		{
-			s = ss.s;
-			ss.s = invalidSocket;
-		}
+		other.s = invalidSocket;
+		other.nonBlocking = false;
+		other.connected = false;
+	}
 
+	socket& operator=(socket&& other) noexcept
+	{
+		if (this != &other)
+		{
+			close(false);
+			s = other.s;
+			nonBlocking = other.nonBlocking;
+			connected = other.connected;
+			other.s = invalidSocket;
+			other.nonBlocking = false;
+			other.connected = false;
+		}
 		return *this;
 	}
 
@@ -292,256 +123,626 @@ public:
 
 	~socket()
 	{
-		close();
-	}
-
-	socket() : s(invalidSocket)
-	{
-		assert(isInited);
-	}
-
-	socket(socketType ss)
-	{
-		assert(isInited);
-		s = ss;
+		close(connected);
 	}
 
 	bool isValid() const
 	{
-		return SOCKET_VALID(s);
+		return socketIsValid(s);
+	}
+
+	bool isNonBlocking() const
+	{
+		return nonBlocking;
+	}
+
+	bool setNonBlocking(bool enabled)
+	{
+		assert(isValid());
+#ifdef _WIN32
+		u_long mode = enabled ? 1 : 0;
+		if (ioctlsocket(static_cast<SOCKET>(s), FIONBIO, &mode) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return false;
+		}
+#else
+		int flags = fcntl(s, F_GETFL, 0);
+		if (flags < 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return false;
+		}
+		if (enabled)
+			flags |= O_NONBLOCK;
+		else
+			flags &= ~O_NONBLOCK;
+		if (fcntl(s, F_SETFL, flags) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return false;
+		}
+#endif
+		nonBlocking = enabled;
+		return true;
+	}
+
+	// Shutdown only when this socket completed connect or accept.
+	// Listening and unbound sockets are closed without a shutdown log.
+	void close(bool clean = true)
+	{
+		if (!isValid())
+			return;
+
+		// clean close also shuts down listeners. That unblocks a thread
+		// sitting in accept(). ENOTCONN/EINVAL is normal for a socket that
+		// was never connected; the destructor skips this unless connected.
+		if (clean)
+		{
+			int status = ::shutdown(s,
+#ifdef _WIN32
+				SD_BOTH
+#else
+				SHUT_RDWR
+#endif
+			);
+			int err = lastErrorCode();
+			if (status != 0 && !isNotConnected(err) && err != EINVAL)
+				reportLastError(__FILE__, __LINE__);
+		}
+
+#ifdef _WIN32
+		if (closesocket(static_cast<SOCKET>(s)) != 0)
+			reportLastError(__FILE__, __LINE__);
+#else
+		if (::close(s) != 0)
+			reportLastError(__FILE__, __LINE__);
+#endif
+		s = invalidSocket;
+		connected = false;
+		nonBlocking = false;
 	}
 
 	uint16_t localPort() const
 	{
-		assert(this->isValid());
-
-		struct sockaddr_in addr;
-		memset(&addr, 0, sizeof(addr));
-#ifdef _WIN32
-		int len = sizeof(addr);
-#else
+		assert(isValid());
+		sockaddr_storage addr;
+		std::memset(&addr, 0, sizeof(addr));
 		socklen_t len = sizeof(addr);
-#endif
-		int res = ::getsockname(s, (struct sockaddr*)&addr, &len);
-		checkErrorMessage(res);
-		if (res != 0)
+		if (::getsockname(s, reinterpret_cast<sockaddr*>(&addr), &len) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
 			return 0;
-		return ntohs(addr.sin_port);
+		}
+		return portOf(reinterpret_cast<sockaddr*>(&addr));
 	}
 
-    bool operator==(const class socket& ss) const
-    {
-        return s == ss.s;
-    }
+	bool operator==(const socket& other) const
+	{
+		return s == other.s;
+	}
 
-	//The connect function establishes a connection to a specified socket.
 	int connect(const std::string& address, uint16_t port, bool udp = false, bool ipv6 = false)
 	{
-        int family = ipv6 ? AF_INET6 : AF_INET, 
-            type = udp ? SOCK_DGRAM : SOCK_STREAM, 
-            proto;
-		struct sockaddr sockaddr;
-        convertAddress(address, port, type, family, &sockaddr, &proto);
+		sockaddr_storage addr;
+		socklen_t addrLen = 0;
+		int family = 0;
+		int type = 0;
+		int proto = 0;
+		if (!resolve(address, port, udp, ipv6, false, addr, addrLen, family, type, proto))
+			return -1;
 
-        create(family, type, proto);
-        assert(this->isValid());
+		create(family, type, proto);
+		if (!isValid())
+			return -1;
 
-		int res = ::connect(s, &sockaddr, sizeof(sockaddr));
-
-		checkErrorMessage(res);
-
-		return res;
+		int res = ::connect(s, reinterpret_cast<sockaddr*>(&addr), addrLen);
+		if (res != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return -1;
+		}
+		connected = true;
+		return 0;
 	}
 
-	//The bind function associates a local address with a socket.
 	int bind(const std::string& address, uint16_t port, bool udp = false, bool ipv6 = false, bool reuseAddress = false, bool reusePort = false)
 	{
-        int family = ipv6 ? AF_INET6 : AF_INET, 
-            type = udp ? SOCK_DGRAM : SOCK_STREAM, 
-            proto;
-		struct sockaddr sockaddr;
-		convertAddress(address, port, type, family, &sockaddr, &proto);
+		sockaddr_storage addr;
+		socklen_t addrLen = 0;
+		int family = 0;
+		int type = 0;
+		int proto = 0;
+		if (!resolve(address, port, udp, ipv6, true, addr, addrLen, family, type, proto))
+			return -1;
 
-        create(family, type, proto);
-        assert(this->isValid());
+		create(family, type, proto);
+		if (!isValid())
+			return -1;
 
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*) & reuseAddress, sizeof(reuseAddress));
-        setsockopt(s, SOL_SOCKET, SO_REUSEPORT, (const char*) & reusePort, sizeof(reusePort));
+		int reuse = reuseAddress ? 1 : 0;
+		if (!setIntOption(SOL_SOCKET, SO_REUSEADDR, reuse))
+			return -1;
+#ifdef SO_REUSEPORT
+		int reuseP = reusePort ? 1 : 0;
+		if (!setIntOption(SOL_SOCKET, SO_REUSEPORT, reuseP))
+			return -1;
+#else
+		(void)reusePort;
+#endif
 
-		int res = ::bind(s, &sockaddr, sizeof(sockaddr));
-
-		checkErrorMessage(res);
-
-		return res;
+		if (::bind(s, reinterpret_cast<sockaddr*>(&addr), addrLen) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return -1;
+		}
+		return 0;
 	}
 
-	//The listen function places a socket in a state 
-	//in which it is listening for an incoming connection.
 	// Default 4096 rather than glibc's SOMAXCONN (128): the kernel still caps
 	// at net.core.somaxconn, so a raised sysctl is not silently truncated.
 	int listen(int backlog = 4096)
 	{
-		assert(this->isValid());
-
-		int res = ::listen(s, backlog);
-
-		checkErrorMessage(res);
-
-		return res;
+		assert(isValid());
+		if (::listen(s, backlog) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return -1;
+		}
+		return 0;
 	}
 
 	socket accept(std::string* addrStr)
 	{
-		assert(this->isValid());
-
-        struct sockaddr_in addr;
-        int len = sizeof(addr);
-		socketType ss = ::accept(s, (struct sockaddr*) & addr, (socklen_t*) & len);
-
-        if (len == sizeof(addr) && addrStr && SOCKET_VALID(ss))
-        {
-            addrStr->reserve(3 + 6 + 16 + 6 + 1);
-            addrStr->append("AF ");
-            switch (addr.sin_family)
-            {
-            case AF_UNSPEC:
-            {
-                addrStr->append("unspec");
-                break;
-            }
-            case AF_INET:
-            {
-                addrStr->append("ipv4");
-                break;
-            }
-            case AF_INET6:
-            {
-                addrStr->append("ipv6");
-                break;
-            }
-            default:
-            {
-                addrStr->append(std::to_string(addr.sin_family));
-                break;
-            }
-            }
-
-            if (char* sa = inet_ntoa(addr.sin_addr))
-            {
-                addrStr->append(" ");
-                addrStr->append(sa);
-            }
-
-            addrStr->append(":");
-            addrStr->append(std::to_string(addr.sin_port));
-        }
-
-		if (!SOCKET_VALID(ss))
+		assert(isValid());
+		sockaddr_storage addr;
+		std::memset(&addr, 0, sizeof(addr));
+		socklen_t len = sizeof(addr);
+#ifdef __linux__
+		socketType accepted = ::accept4(s, reinterpret_cast<sockaddr*>(&addr), &len, SOCK_CLOEXEC);
+#else
+		socketType accepted = ::accept(s, reinterpret_cast<sockaddr*>(&addr), &len);
+#endif
+		if (!socketIsValid(accepted))
 		{
-			checkErrorMessage(1);
+			if (!isWouldBlock(lastErrorCode()))
+				reportLastError(__FILE__, __LINE__);
+			return socket(invalidSocket);
 		}
-
-		return socket(ss);
+#ifndef _WIN32
+#ifndef __linux__
+		if (fcntl(accepted, F_SETFD, FD_CLOEXEC) != 0)
+			reportLastError(__FILE__, __LINE__);
+#endif
+#endif
+		if (addrStr)
+			*addrStr = formatAddress(reinterpret_cast<sockaddr*>(&addr));
+		socket out(accepted);
+		out.connected = true;
+		return out;
 	}
 
-	//The send function sends data on a connected socket.
+	// Blocking: all of len, or an error. Non-blocking: bytes accepted by the
+	// kernel, or kWouldBlock when none were moved.
 	int send(const char* buf, int len)
 	{
-		assert(this->isValid());
-		assert(buf);
+		assert(isValid());
+		assert(buf || len == 0);
+		if (len == 0)
+			return 0;
 
-        //send would raise SIGPIPE if the other side disconnected
-        //that would terminate our program
-        int flags = MSG_NOSIGNAL;
-
-        int bytesSent = 0;
-        while (bytesSent < len)
-        {
-            int res = ::send(s, buf + bytesSent, len - bytesSent, flags);
-
-            if (res == socketError)
-            {
-                //check if the other side closed the connection
-                if (errno == EPIPE)
-                {
-                    return -2;
-                }
-
-                checkErrorMessage(res);
-                return res;
-            }
-
-            bytesSent += res;
-        }
-
-        assert(bytesSent == len);
-
-		return bytesSent;
+		int flags = 0;
+#ifdef MSG_NOSIGNAL
+		flags = MSG_NOSIGNAL;
+#endif
+		int sent = 0;
+		while (sent < len)
+		{
+			int res = ::send(s, buf + sent, size_t(len - sent), flags);
+			if (res < 0)
+			{
+				int err = lastErrorCode();
+				if (isInterrupted(err))
+					continue;
+				if (isWouldBlock(err))
+					return sent > 0 ? sent : kWouldBlock;
+				if (isPipe(err))
+					return kPeerClosed;
+				reportLastError(__FILE__, __LINE__);
+				return sent > 0 ? sent : -1;
+			}
+			if (res == 0)
+				break;
+			sent += res;
+			if (nonBlocking)
+			{
+				// One more iteration only happens if the kernel still accepts
+				// bytes. Stop once a call would block (handled above).
+			}
+		}
+		return sent;
 	}
 
-    bool receivedAnyBytes()
-    {
-        assert(this->isValid());
+	int sendto(const char* buf, int len, const std::string& address, uint16_t port, bool ipv6 = false)
+	{
+		assert(isValid());
+		assert(buf || len == 0);
+		sockaddr_storage addr;
+		socklen_t addrLen = 0;
+		int family = 0;
+		int type = 0;
+		int proto = 0;
+		if (!resolve(address, port, true, ipv6, false, addr, addrLen, family, type, proto))
+			return -1;
 
-        struct pollfd fds;
-        fds.fd = s;
-        fds.events = POLLIN;
+		int flags = 0;
+#ifdef MSG_NOSIGNAL
+		flags = MSG_NOSIGNAL;
+#endif
+		for (;;)
+		{
+			int res = ::sendto(s, buf, size_t(len), flags, reinterpret_cast<sockaddr*>(&addr), addrLen);
+			if (res < 0)
+			{
+				int err = lastErrorCode();
+				if (isInterrupted(err))
+					continue;
+				if (isWouldBlock(err))
+					return kWouldBlock;
+				reportLastError(__FILE__, __LINE__);
+				return -1;
+			}
+			return res;
+		}
+	}
 
-        ::poll(&fds, 1, 0);
+	// 1 readable, 0 timeout, -1 error. Used by the HTTP upgrade so a partial
+	// header does not spin or block forever.
+	int waitReadable(int timeoutMs)
+	{
+		assert(isValid());
+#ifdef _WIN32
+		WSAPOLLFD fds;
+		fds.fd = static_cast<SOCKET>(s);
+		fds.events = POLLIN;
+		fds.revents = 0;
+		int res = WSAPoll(&fds, 1, timeoutMs);
+		if (res < 0)
+		{
+			if (WSAGetLastError() == WSAEINTR)
+				return 0;
+			reportLastError(__FILE__, __LINE__);
+			return -1;
+		}
+		if (res == 0)
+			return 0;
+		return (fds.revents & (POLLIN | POLLHUP | POLLERR)) != 0 ? 1 : 0;
+#else
+		pollfd fds;
+		fds.fd = s;
+		fds.events = POLLIN;
+		fds.revents = 0;
+		for (;;)
+		{
+			int res = ::poll(&fds, 1, timeoutMs);
+			if (res < 0 && errno == EINTR)
+				continue;
+			if (res < 0)
+			{
+				reportLastError(__FILE__, __LINE__);
+				return -1;
+			}
+			if (res == 0)
+				return 0;
+			return (fds.revents & (POLLIN | POLLHUP | POLLERR)) != 0 ? 1 : 0;
+		}
+#endif
+	}
 
-        return fds.revents & fds.events;
-    }
+	bool receivedAnyBytes()
+	{
+		assert(isValid());
+#ifdef _WIN32
+		WSAPOLLFD fds;
+		fds.fd = static_cast<SOCKET>(s);
+		fds.events = POLLIN;
+		fds.revents = 0;
+		int res = WSAPoll(&fds, 1, 0);
+		if (res < 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return false;
+		}
+		return (fds.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+#else
+		pollfd fds;
+		fds.fd = s;
+		fds.events = POLLIN;
+		fds.revents = 0;
+		for (;;)
+		{
+			int res = ::poll(&fds, 1, 0);
+			if (res < 0 && errno == EINTR)
+				continue;
+			if (res < 0)
+			{
+				reportLastError(__FILE__, __LINE__);
+				return false;
+			}
+			break;
+		}
+		return (fds.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+#endif
+	}
 
-	//The recv function receives data from a connected socket 
-	//or a bound connectionless socket.
+	// singleRecv: one successful recv, then return (short reads included).
+	// Otherwise blocking sockets fill len. Non-blocking sockets stop on would-block.
 	int receive(char* buf, int len, bool singleRecv = false)
 	{
-		assert(this->isValid());
-		assert(buf);
+		assert(isValid());
+		assert(buf || len == 0);
+		if (len == 0)
+			return 0;
 
-        int bytesReceived = 0;
-        while (bytesReceived < len)
-        {
-            int res = ::recv(s, buf + bytesReceived, len - bytesReceived, 0);
+		int got = 0;
+		while (got < len)
+		{
+			int res = ::recv(s, buf + got, size_t(len - got), 0);
+			if (res == 0)
+				return got > 0 ? got : kPeerClosed;
+			if (res < 0)
+			{
+				int err = lastErrorCode();
+				if (isInterrupted(err))
+					continue;
+				if (isWouldBlock(err))
+					return got > 0 ? got : kWouldBlock;
+				reportLastError(__FILE__, __LINE__);
+				return got > 0 ? got : -1;
+			}
+			got += res;
+			if (singleRecv || nonBlocking)
+				break;
+		}
+		return got;
+	}
 
-            //check if the other side closed the connection
-            if (res == 0)
-            {
-                return -2;
-            }
-            else if (res == socketError)
-            {
-                checkErrorMessage(res);
-                return res;
-            }
-
-            bytesReceived += res;
-
-            if (singleRecv)
-            {
-                break;
-            }
-        }
-
-        return bytesReceived;
+	int recvfrom(char* buf, int len, std::string* addrStr)
+	{
+		assert(isValid());
+		assert(buf || len == 0);
+		sockaddr_storage addr;
+		std::memset(&addr, 0, sizeof(addr));
+		socklen_t addrLen = sizeof(addr);
+		for (;;)
+		{
+			int res = ::recvfrom(s, buf, size_t(len), 0, reinterpret_cast<sockaddr*>(&addr), &addrLen);
+			if (res < 0)
+			{
+				int err = lastErrorCode();
+				if (isInterrupted(err))
+					continue;
+				if (isWouldBlock(err))
+					return kWouldBlock;
+				reportLastError(__FILE__, __LINE__);
+				return -1;
+			}
+			if (addrStr)
+				*addrStr = formatAddress(reinterpret_cast<sockaddr*>(&addr));
+			return res;
+		}
 	}
 
 	int getMaxMessageSize()
 	{
-		assert(this->isValid());
-
-		int val = 0;
+		assert(isValid());
 #ifdef _WIN32
-		int valSize = sizeof(val);		
-		int res = ::getsockopt(s, SOL_SOCKET, SO_MAX_MSG_SIZE, (char*)&val, &valSize);
-
-		checkErrorMessage(res);
-#else
-		val = 65535;
-#endif
-
+		int val = 0;
+		int valSize = sizeof(val);
+		if (::getsockopt(s, SOL_SOCKET, SO_MAX_MSG_SIZE, reinterpret_cast<char*>(&val), &valSize) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return kUdpMaxMessageSize;
+		}
 		return val;
+#else
+		return kUdpMaxMessageSize;
+#endif
+	}
+
+private:
+	socketType s = invalidSocket;
+	bool nonBlocking = false;
+	bool connected = false;
+
+	friend struct EventWait;
+
+	static bool socketIsValid(socketType fd)
+	{
+#ifdef _WIN32
+		return fd != invalidSocket;
+#else
+		return fd >= 0;
+#endif
+	}
+
+	static int lastErrorCode()
+	{
+#ifdef _WIN32
+		return WSAGetLastError();
+#else
+		return errno;
+#endif
+	}
+
+	static bool isInterrupted(int err)
+	{
+#ifdef _WIN32
+		return err == WSAEINTR;
+#else
+		return err == EINTR;
+#endif
+	}
+
+	static bool isWouldBlock(int err)
+	{
+#ifdef _WIN32
+		return err == WSAEWOULDBLOCK;
+#else
+#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN)
+		if (err == EWOULDBLOCK)
+			return true;
+#endif
+		return err == EAGAIN;
+#endif
+	}
+
+	static bool isPipe(int err)
+	{
+#ifdef _WIN32
+		return err == WSAECONNRESET || err == WSAECONNABORTED;
+#else
+		return err == EPIPE || err == ECONNRESET;
+#endif
+	}
+
+	static bool isNotConnected(int err)
+	{
+#ifdef _WIN32
+		return err == WSAENOTCONN;
+#else
+		return err == ENOTCONN;
+#endif
+	}
+
+	static void reportLastError(const char* file, int line)
+	{
+#ifdef _WIN32
+		int error = WSAGetLastError();
+		char* message = nullptr;
+		FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+			nullptr, error,
+			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+			reinterpret_cast<LPSTR>(&message), 0, nullptr);
+		if (message)
+		{
+			std::cerr << message << "@" << file << ":" << line << std::endl;
+			LocalFree(message);
+		}
+		else
+		{
+			std::cerr << "socket error " << error << "@" << file << ":" << line << std::endl;
+		}
+#else
+		std::cerr << std::strerror(errno) << "@" << file << ":" << line << std::endl;
+#endif
+	}
+
+	static uint16_t portOf(const sockaddr* addr)
+	{
+		if (!addr)
+			return 0;
+		if (addr->sa_family == AF_INET)
+			return ntohs(reinterpret_cast<const sockaddr_in*>(addr)->sin_port);
+		if (addr->sa_family == AF_INET6)
+			return ntohs(reinterpret_cast<const sockaddr_in6*>(addr)->sin6_port);
+		return 0;
+	}
+
+	static std::string formatAddress(const sockaddr* addr)
+	{
+		if (!addr)
+			return {};
+		char host[INET6_ADDRSTRLEN] = {};
+		uint16_t port = portOf(addr);
+		const char* family = "unspec";
+		if (addr->sa_family == AF_INET)
+		{
+			family = "ipv4";
+			inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(addr)->sin_addr, host, sizeof(host));
+		}
+		else if (addr->sa_family == AF_INET6)
+		{
+			family = "ipv6";
+			inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(addr)->sin6_addr, host, sizeof(host));
+		}
+		else
+		{
+			return std::string("AF ") + std::to_string(addr->sa_family);
+		}
+		return std::string("AF ") + family + " " + host + ":" + std::to_string(port);
+	}
+
+	static bool resolve(const std::string& address, uint16_t port, bool udp, bool ipv6, bool passive,
+		sockaddr_storage& outAddr, socklen_t& outLen, int& family, int& type, int& proto)
+	{
+		family = ipv6 ? AF_INET6 : AF_INET;
+		type = udp ? SOCK_DGRAM : SOCK_STREAM;
+		proto = 0;
+		outLen = 0;
+		std::memset(&outAddr, 0, sizeof(outAddr));
+
+		addrinfo hints = {};
+		hints.ai_family = family;
+		hints.ai_socktype = type;
+		if (passive && address.empty())
+			hints.ai_flags = AI_PASSIVE;
+
+		const std::string portStr = std::to_string(port);
+		addrinfo* info = nullptr;
+		int res = getaddrinfo(address.empty() ? nullptr : address.c_str(), portStr.c_str(), &hints, &info);
+		if (res != 0)
+		{
+			std::cerr << gai_strerror(res) << std::endl;
+			return false;
+		}
+		if (!info || !info->ai_addr || info->ai_addrlen > sizeof(sockaddr_storage))
+		{
+			std::cerr << "Convert address couldn't find address matching family" << std::endl;
+			freeaddrinfo(info);
+			return false;
+		}
+
+		std::memcpy(&outAddr, info->ai_addr, info->ai_addrlen);
+		outLen = socklen_t(info->ai_addrlen);
+		family = info->ai_family;
+		type = info->ai_socktype;
+		proto = info->ai_protocol;
+		freeaddrinfo(info);
+		return true;
+	}
+
+	void create(int af, int type, int proto)
+	{
+		if (isValid())
+			return;
+#ifdef __linux__
+		s = ::socket(af, type | SOCK_CLOEXEC, proto);
+#else
+		s = ::socket(af, type, proto);
+#endif
+		if (!socketIsValid(s))
+		{
+			reportLastError(__FILE__, __LINE__);
+			s = invalidSocket;
+			return;
+		}
+#ifndef _WIN32
+#ifndef __linux__
+		if (fcntl(s, F_SETFD, FD_CLOEXEC) != 0)
+			reportLastError(__FILE__, __LINE__);
+#endif
+#endif
+	}
+
+	bool setIntOption(int level, int name, int value)
+	{
+		const char* bytes = reinterpret_cast<const char*>(&value);
+		if (::setsockopt(s, level, name, bytes, sizeof(value)) != 0)
+		{
+			reportLastError(__FILE__, __LINE__);
+			return false;
+		}
+		return true;
 	}
 };
-
-bool socket::isInited = false; 
