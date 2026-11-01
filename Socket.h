@@ -15,6 +15,8 @@
 #else
 #include <sys/socket.h>
 #include <sys/poll.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -243,7 +245,27 @@ public:
 			return -1;
 		}
 		connected = true;
+		if (!udp)
+			setNoDelay(true);
 		return 0;
+	}
+
+	// Every write here is a whole message. Nagle held a small one back until the peer
+	// acked the last, and the peer's delayed ack made each reply wait about 40 ms.
+	bool setNoDelay(bool enabled)
+	{
+		assert(isValid());
+		return setIntOption(IPPROTO_TCP, TCP_NODELAY, enabled ? 1 : 0);
+	}
+
+	bool isNoDelay() const
+	{
+		assert(isValid());
+		int value = 0;
+		socklen_t size = sizeof(value);
+		if (::getsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&value), &size) != 0)
+			return false;
+		return value != 0;
 	}
 
 	int bind(const std::string& address, uint16_t port, bool udp = false, bool ipv6 = false, bool reuseAddress = false, bool reusePort = false)
@@ -319,6 +341,8 @@ public:
 			*addrStr = formatAddress(reinterpret_cast<sockaddr*>(&addr));
 		socket out(accepted);
 		out.connected = true;
+		// Only stream sockets accept, so this is always TCP.
+		out.setNoDelay(true);
 		return out;
 	}
 
